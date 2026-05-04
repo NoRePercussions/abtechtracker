@@ -1,0 +1,90 @@
+name: abtech-tracker
+
+# Copy deploy/container.env.example → deploy/container.env and fill in secrets.
+# Copy .env.example → .env and fill in DB_PASSWORD.
+# Build the image: podman compose build
+# Start all services: podman compose up -d
+# Initial search index: podman compose exec ts rails ts:index
+# Weekly reindex can be scheduled via host cron: podman compose exec ts rails ts:index
+
+services:
+
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ""
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+      MARIADB_DATABASE: abtech_tracker
+      MARIADB_USER: tracker
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: abtech-tracker:latest
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: deploy/container.env
+    environment:
+      DATABASE_URL: mysql2://tracker:${DB_PASSWORD}@db/abtech_tracker?pool=5
+      SPHINX_BIND: /srv/sphinx/searchd.sock
+      SPHINX_PID: /srv/sphinx/searchd.pid
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - sphinx_run:/srv/sphinx
+      - public:/srv/public
+
+  ts:
+    image: abtech-tracker:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: deploy/container.env
+    environment:
+      DATABASE_URL: mysql2://tracker:${DB_PASSWORD}@db/abtech_tracker?pool=5
+      SPHINX_BIND: /srv/sphinx/searchd.sock
+      SPHINX_PID: /srv/sphinx/searchd.pid
+    volumes:
+      - sphinx_run:/srv/sphinx
+      - sphinx_data:/rails/db/sphinx
+    command: ["./bin/rails", "ts:start", "NODETACH=true"]
+
+  email:
+    image: abtech-tracker:latest
+    restart: unless-stopped
+    depends_on:
+      - web
+    env_file: deploy/container.env
+    environment:
+      DATABASE_URL: mysql2://tracker:${DB_PASSWORD}@db/abtech_tracker?pool=5
+    command: ["./bin/rails", "email:idle"]
+
+  slack:
+    image: abtech-tracker:latest
+    restart: unless-stopped
+    depends_on:
+      - web
+    env_file: deploy/container.env
+    environment:
+      DATABASE_URL: mysql2://tracker:${DB_PASSWORD}@db/abtech_tracker?pool=5
+    command:
+      - /bin/bash
+      - -c
+      - while true; do ./bin/rails slack:notify; sleep 3600; done
+
+volumes:
+  db_data:
+  sphinx_run:
+  sphinx_data:
+  public:
